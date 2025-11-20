@@ -12,8 +12,9 @@ from seqeval.metrics import classification_report, precision_score, recall_score
 from sklearn.metrics import confusion_matrix
 
 
-# device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-# print("Using device:", device)
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+print("Using device:", device)
 
 conll = load_dataset("text", data_files={
     "train": "../data/cleaned/train.conll",
@@ -119,7 +120,7 @@ model.config.id2label = id2label
 # device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 # print("Using device:", device)
 
-# model.to(device)
+model.to(device)
 
 data_collator = DataCollatorForTokenClassification(tokenizer)
 
