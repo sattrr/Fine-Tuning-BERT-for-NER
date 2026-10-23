@@ -1,0 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+streamlit
+torch==2.7.1
+transformers==4.36.2
+huggingface_hub==0.36.2

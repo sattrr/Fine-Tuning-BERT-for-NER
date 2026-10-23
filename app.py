@@ -1,141 +1,139 @@
+import os
 import streamlit as st
 import torch
-import json
-from transformers import AutoTokenizer, AutoModelForTokenClassification
+from transformers import AutoModelForTokenClassification, AutoTokenizer
 
+MAX_LENGTH = 128
+
+def get_setting(key, default=None):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, default)
+
+MODEL_ID = get_setting("MODEL_ID", "model/")
+HF_TOKEN = get_setting("HF_TOKEN")
+
+
+@st.cache_resource(show_spinner="Loading model, please wait.")
 def load_model():
-    tokenizer = AutoTokenizer.from_pretrained("model/")
-    model = AutoModelForTokenClassification.from_pretrained("model/")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=HF_TOKEN)
+    model = AutoModelForTokenClassification.from_pretrained(MODEL_ID, token=HF_TOKEN)
     model.eval()
     return tokenizer, model
 
 tokenizer, model = load_model()
-
-# with open('label_map.json', 'r') as f:
-#     label_map = json.load(f)
-
 id2label = model.config.id2label
 
 def predict_ner(text):
-    inputs = tokenizer(
-        text, 
-        return_tensors="pt", 
-        truncation=True, 
-        max_length=128,
-        is_split_into_words=False
+    n_tokens = len(tokenizer(text, add_special_tokens=True)["input_ids"])
+    truncated = n_tokens > MAX_LENGTH
+
+    enc = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=MAX_LENGTH,
+        return_offsets_mapping=True,
     )
+    offsets = enc.pop("offset_mapping")[0].tolist()
 
-    with torch.no_grad():
-        outputs = model(**inputs)
+    with torch.inference_mode():
+        logits = model(**enc).logits
 
-    predictions = torch.argmax(outputs.logits, dim=2)[0].tolist()
-    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+    preds = logits.argmax(dim=-1)[0].tolist()
+    tokens = tokenizer.convert_ids_to_tokens(enc["input_ids"][0])
 
     results = []
-    for token, pred in zip(tokens, predictions):
-        if token not in ["[CLS]", "[SEP]"]:
-            label = id2label[pred]
-            results.append((token, label))
-    
-    return results
+    for token, pred, (start, end) in zip(tokens, preds, offsets):
+        if start == end:
+            continue
+        results.append(
+            {"token": token, "label": id2label[pred], "start": start, "end": end}
+        )
+    return results, truncated
 
-# def merge_entities(results):
-#     entities = []
-#     current_entity = ""
-#     current_label = ""
-
-#     for token, label in results:
-#         if label.startswith("B-"):
-#             if current_entity:
-#                 entities.append((current_entity.strip(), current_label))
-#             current_entity = token
-#             current_label = label[2:]
-
-#         elif label.startswith("I-") and current_label == label[2:]:
-#             if token.startswith("##"):
-#                 current_entity += token.replace("##", "")
-#             else:
-#                 current_entity += " " + token
-
-#         else:
-#             if current_entity:
-#                 entities.append((current_entity.strip(), current_label))
-#                 current_entity = ""
-#                 current_label = ""
-
-#     if current_entity:
-#         entities.append((current_entity.strip(), current_label))
-
-#     return entities
-
-def merge_entities_iob(results):
+def merge_entities(text, results):
     entities = []
-    current_entity = ""
-    current_label = ""
-    iob_seq = []
+    cur = None
 
-    for token, label in results:
-        if label.startswith("B-"):
-            if current_entity:
-                entities.append((current_entity.strip(), current_label, " ".join(iob_seq)))
-            current_entity = token.replace("##", "")
-            current_label = label[2:]
-            iob_seq = [label]
+    def close():
+        nonlocal cur
+        if cur:
+            entities.append(
+                {
+                    "Entitas": text[cur["start"] : cur["end"]],
+                    "Label": cur["label"],
+                    "IOB Seq": " ".join(cur["iob"]),
+                }
+            )
+            cur = None
 
-        elif label.startswith("I-") and current_label == label[2:]:
-            if token.startswith("##"):
-                current_entity += token.replace("##", "")
+    for r in results:
+        label, token = r["label"], r["token"]
+
+        if token.startswith("##") and cur:
+            cur["end"] = r["end"]
+            if label != "O":
+                cur["iob"].append(label)
+        elif label.startswith("B-"):
+            close()
+            cur = {"start": r["start"], "end": r["end"], "label": label[2:], "iob": [label]}
+        elif label.startswith("I-"):
+            if cur and cur["label"] == label[2:]:
+                cur["end"] = r["end"]
+                cur["iob"].append(label)
             else:
-                current_entity += " " + token
-            iob_seq.append(label)
-
+                close()
+                cur = {"start": r["start"], "end": r["end"], "label": label[2:], "iob": [label]}
         else:
-            if current_entity:
-                entities.append((current_entity.strip(), current_label, " ".join(iob_seq)))
-                current_entity = ""
-                current_label = ""
-                iob_seq = []
+            close()
 
-    if current_entity:
-        entities.append((current_entity.strip(), current_label, " ".join(iob_seq)))
-
+    close()
     return entities
 
 st.title("Named Entity Recognition with BERT")
-st.write("Enter text to recognize named entities.")
+
+CONTOH_ENTITAS = [
+    {"Entity example": "An. A", "Label": "NAME"},
+    {"Entity example": "20-12-2025", "Label": "DATE"},
+    {"Entity example": "Jl. Merdeka Barat No. 17", "Label": "ADDR"},
+    {"Entity example": "11581687", "Label": "ID"},
+    {"Entity example": "Islam", "Label": "PII"},
+    {"Entity example": "Tuberkulosis", "Label": "COND"},
+    {"Entity example": "Vitamin C", "Label": "NUTR"},
+    {"Entity example": "Tempe", "Label": "FOOD"},
+]
+
+with st.expander("Entity example and label list"):
+    st.table(CONTOH_ENTITAS)
+
+st.write("Input text for labelling.")
+st.markdown(":red[**This model supports Indonesian text only**]")
 
 text = st.text_area("Input Text", height=200)
 
 if st.button("Predict"):
-    if text.strip():
-        results = predict_ner(text)
-        entities = merge_entities_iob(results)
+    if not text.strip():
+        st.warning("Please input text first.")
+    else:
+        results, truncated = predict_ner(text)
+        entities = merge_entities(text, results)
+
+        if truncated:
+            st.warning(
+                f"The text exceeds {MAX_LENGTH} tokens."
+            )
 
         st.subheader("Detected Entities")
-
         if entities:
-            for ent, label, iob in entities:
-                st.markdown(f"""
-                            **Entitas** : {ent}  
-                            **Label** : `{label}`  
-                            **IOB Seq** : `{iob}`
-                            """)
+            st.dataframe(entities, use_container_width=True, hide_index=True)
         else:
-            st.info("No named entities detected.")
-    else:
-        st.warning("Please enter some text.")
+            st.info("No entity detected.")
 
-# if st.button("Predict"):
-#     if text.strip():
-#         results = predict_ner(text)
-#         entities = merge_entities(results)
-
-#         st.subheader("Detected Entities")
-
-#         if entities:
-#             for ent, label in entities:
-#                 st.write(f"{ent} → {label}")
-#         else:
-#             st.info("No named entities detected.")
-#     else:
-#         st.warning("Please enter some text.")
+        with st.expander("See labels per token"):
+            st.dataframe(
+                [{"Token": r["token"], "Label": r["label"]} for r in results],
+                use_container_width=True,
+                hide_index=True,
+            )
