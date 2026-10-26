@@ -110,7 +110,7 @@ with st.expander("Entity example and label list"):
 
 st.write("Input text for labelling.")
 st.caption("ex: an. A adalah seorang pasien yang mengidap penyakit tuberkulosis")
-st.markdown(":red[**This model supports Indonesian text only**]")
+st.warning("This model supports Indonesian text only")
 
 text = st.text_area("Input Text", height=200)
 
